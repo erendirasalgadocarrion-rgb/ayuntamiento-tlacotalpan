@@ -1,10 +1,17 @@
 <!DOCTYPE html>
+<!--
+  Sistema de Egresos — versión V303  ·  6 de agosto de 2026
+  Cambios respecto a V300:
+    V301 · errores de Supabase visibles (avisoSupabase) · Fondos de solo lectura
+    V302 · catálogos leídos desde Supabase, ya no escritos en este archivo
+    V303 · Catálogos se repinta al terminar la descarga
+-->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.3/dist/umd/supabase.min.js" async></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sistema de Egresos V222 - H. Ayuntamiento de Tlacotalpan</title>
+<title>Sistema de Egresos V303 - H. Ayuntamiento de Tlacotalpan</title>
 <style>
 /* ─── TOKENS ──────────────────────────────────────────────── */
 :root{
@@ -2431,10 +2438,10 @@ tr:last-child td{border-bottom:none;}
 </div>
 
 <div class="sec" id="sec-catalogos">
-  <div class="sec-hdr"><div class="sec-hdr-txt"><h3>Catálogos</h3><p>Administración de fondos y programas presupuestales</p></div><div style="display:flex;gap:8px;"><button class="btn bgold" onclick="migrarDatos()" title="Subir datos locales a Supabase">☁️ Migrar a Supabase</button><button class="btn bo" onclick="pullFromSupabase().then(function(n){toast(n+' registros descargados','ok');uBadges();})" title="Descargar datos de Supabase">⬇️ Sync</button><button class="btn bd" onclick="limpiarTodosLosDatos()" title="Borra todos los datos locales">🗑️ Limpiar datos</button></div></div>
+  <div class="sec-hdr"><div class="sec-hdr-txt"><h3>Catálogos</h3><p>Administración de fondos y programas presupuestales</p></div><div style="display:flex;gap:8px;"><button class="btn bgold" onclick="migrarDatos()" title="Subir datos locales a Supabase">☁️ Migrar a Supabase</button><button class="btn bo" onclick="pullFromSupabase().then(function(n){toast(n+' registros descargados','ok');uBadges();rCatalogos();})" title="Descargar datos de Supabase">⬇️ Sync</button><button class="btn bd" onclick="limpiarTodosLosDatos()" title="Borra todos los datos locales">🗑️ Limpiar datos</button></div></div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;">
     <div class="card">
-      <div class="ct" style="justify-content:space-between;"><span class="ct-left">Fondos</span><button class="btn bp btm" onclick="om('m-fondo')">Agregar</button></div>
+      <div class="ct" style="justify-content:space-between;"><span class="ct-left">Fondos</span><button class="btn bo btm" onclick="fondosSoloLectura()" title="Catálogo administrado por el proveedor del sistema">Agregar</button></div>
       <div class="tw"><table><thead><tr><th>Nombre</th><th style="text-align:center;">Estado</th><th></th></tr></thead><tbody id="cat-fondos"></tbody></table></div>
     </div>
     <div class="card">
@@ -3267,9 +3274,18 @@ function poblarLoginSelect(){
     o.value=i;o.textContent=u.nombre;sel.appendChild(o);
   });
 }
+function avisoSinUsuarios(){
+  var sel=document.getElementById("lsel");
+  if(!sel)return;
+  if(USUARIOS.length===0){
+    sel.innerHTML='<option value="">-- Sin usuarios: conecta a internet --</option>';
+    try{toast("No hay usuarios cargados. Conecta a internet para descargarlos.","err");}catch(e){}
+  }
+}
 function cargarUsuariosSistema(){
   var cache=lsGet("egresos_usuarios_cache",null);
   if(cache&&cache.length){USUARIOS.length=0;cache.forEach(function(u){USUARIOS.push(u);});poblarLoginSelect();}
+  else{setTimeout(avisoSinUsuarios,6000);}
   if(!supa||!AUTH_OK)return;
   supa.from("usuarios_sistema").select("nombre,area,perfil,pin,activo").order("nombre").then(function(res){
     if(res.error||!res.data||!res.data.length)return;
@@ -3341,12 +3357,32 @@ async function ejecutarArranque(){
   setTimeout(function(){location.reload();},2500);
 }
 
+// ═══ V301: ERRORES VISIBLES ══════════════════════════════════════
+// Hasta la v300 los fallos de Supabase solo se escribían en la consola
+// del navegador (console.warn) y el usuario no se enteraba de nada:
+// veía su pantalla normal y suponía que se había guardado.
+// Así se perdió la nómina durante meses.
+// avisoSupabase() muestra el error en pantalla, pero con freno:
+// el mismo aviso no se repite antes de 30 segundos, para que una
+// desconexión no llene la pantalla de mensajes.
+var _avisosVistos={};
+function avisoSupabase(contexto, mensaje, silencioso){
+  console.warn(contexto+':', mensaje);
+  if(silencioso) return;
+  var ahora=Date.now();
+  if(_avisosVistos[contexto] && (ahora-_avisosVistos[contexto])<30000) return;
+  _avisosVistos[contexto]=ahora;
+  if(typeof toast==="function") toast("No se guardó en la nube ("+contexto+"): "+mensaje,"err");
+}
+
 async function dbGet(tabla, cacheKey, defVal) {
   try {
     var { data, error } = await supa.from(tabla).select('*').order('fecha_registro', {ascending:false});
     if (error) throw error;
     return data || defVal;
   } catch(e) {
+    // Lectura: no molesta al usuario. Si falla, usa la copia local
+    // y el sistema sigue funcionando sin conexión (por diseño).
     console.warn('Supabase read:', tabla, e.message);
     return lsGet(cacheKey, defVal);
   }
@@ -3358,7 +3394,7 @@ async function dbUpsert(tabla, registro) {
     if (error) throw error;
     return true;
   } catch(e) {
-    console.warn('Supabase write:', tabla, e.message);
+    avisoSupabase('guardar en '+tabla, e.message);
     return false;
   }
 }
@@ -3369,7 +3405,7 @@ async function dbDelete(tabla, id) {
     if (error) throw error;
     return true;
   } catch(e) {
-    console.warn('Supabase delete:', tabla, e.message);
+    avisoSupabase('borrar en '+tabla, e.message);
     return false;
   }
 }
@@ -3402,8 +3438,8 @@ async function syncAutoSubirTabla(lsKey,tabla){
     if(!datos.length) return;
     var envueltos=datos.map(function(r){return {id:r.id,data:r};});
     var res=await supa.from(tabla).upsert(envueltos,{onConflict:'id'});
-    if(res.error) console.warn('Sync auto:',tabla,res.error.message);
-  }catch(e){ console.warn('Sync auto:',tabla,e.message); }
+    if(res.error) avisoSupabase('sincronizar '+tabla, res.error.message);
+  }catch(e){ avisoSupabase('sincronizar '+tabla, e.message); }
 }
 
 async function syncToSupabase(tabla, lsKey) {
@@ -3412,11 +3448,66 @@ async function syncToSupabase(tabla, lsKey) {
     if (!datos.length) return;
     // V211: el registro completo viaja en la columna "data" (jsonb) —
     // así ningún campo nuevo vuelve a romper la sincronización.
-    await supa.from(tabla).upsert({id:datos[0].id, data:datos[0]}, {onConflict:'id'});
+    // V301: `fondos` es catálogo compartido de solo lectura. Intentar
+    // escribirlo siempre falla; no vale la pena avisar de algo esperado.
+    if (tabla === 'fondos') return;
+    var res = await supa.from(tabla).upsert({id:datos[0].id, data:datos[0]}, {onConflict:'id'});
+    if (res && res.error) avisoSupabase('sincronizar '+tabla, res.error.message);
   } catch(e) {
-    // Silencioso — no interrumpe el flujo del usuario
-    console.warn('Sync error:', tabla, e.message);
+    avisoSupabase('sincronizar '+tabla, e.message);
   }
+}
+
+// ═══ V301: CATÁLOGOS DESDE LA NUBE ══════════════════════════════
+// Tres catálogos, con tres dueños distintos:
+//   fondos         → fuentes federales, compartido, solo lectura
+//   cog_capitulos  → Clasificador por Objeto del Gasto (CONAC),
+//                    compartido, solo lectura, norma nacional
+//   programas      → acciones que aprueba el Cabildo de cada
+//                    Ayuntamiento, filtrado por municipio (RLS)
+//
+// Si falla la descarga se conserva la copia local y el sistema sigue
+// funcionando sin conexión. Solo si nunca se ha descargado nada la
+// pantalla aparecerá vacía, y eso es correcto: mejor vacío que
+// mostrando los datos de otro municipio.
+async function pullCatalogos(){
+  var n = {fondos:0, cog:0, progs:0};
+  try{
+    var f = await supa.from('fondos').select('nombre,activo').order('nombre');
+    if(f.error) avisoSupabase('catálogo fondos', f.error.message);
+    else if(f.data){ lsSet('egresos_fondos', f.data); n.fondos=f.data.length; }
+  }catch(e){ avisoSupabase('catálogo fondos', e.message); }
+
+  try{
+    var c = await supa.from('cog_capitulos').select('clave,descripcion,activo').order('orden');
+    if(c.error) avisoSupabase('catálogo COG', c.error.message);
+    else if(c.data){
+      lsSet('egresos_cog', c.data.map(function(r){
+        return {clave:r.clave, desc:r.descripcion, activo:r.activo, cog:true};
+      }));
+      n.cog=c.data.length;
+    }
+  }catch(e){ avisoSupabase('catálogo COG', e.message); }
+
+  try{
+    var p = await supa.from('programas').select('clave,descripcion,activo').order('clave');
+    if(p.error) avisoSupabase('catálogo programas', p.error.message);
+    else if(p.data){
+      lsSet('egresos_progs', p.data.map(function(r){
+        return {clave:r.clave, desc:r.descripcion, activo:r.activo};
+      }));
+      n.progs=p.data.length;
+    }
+  }catch(e){ avisoSupabase('catálogo programas', e.message); }
+
+  // V302: repintar Catálogos en cuanto llegan. Antes el refresco dependía
+  // del contador de las nueve tablas transaccionales, que en un sistema
+  // sin movimientos vale cero — así que la pantalla nunca se actualizaba.
+  try{ if(document.getElementById("cat-progs")) rCatalogos(); }catch(e){}
+  try{ if(typeof tiposActualizarSelect==="function") tiposActualizarSelect(); }catch(e){}
+
+  console.log("Catálogos:", n.fondos+" fondos, "+n.cog+" capítulos COG, "+n.progs+" programas");
+  return n;
 }
 
 async function pullFromSupabase() {
@@ -3424,6 +3515,11 @@ async function pullFromSupabase() {
   if(!supa) return 0;
   _syncPullEnCurso=true; // V214: los lsSet del merge no deben re-subirse
   try{
+  // V301: los catálogos se bajan primero. Antes vivían escritos dentro
+  // de este archivo (FONDOS_DEF / PROGS_DEF), lo que hacía que cualquier
+  // municipio viera las acciones FORTAMUN de Tlacotalpan.
+  await pullCatalogos();
+
   var tablas = [
     {tabla:'solicitudes',          ls:'egresos_sols'},
     {tabla:'requisiciones',        ls:'egresos_reqs'},
@@ -3558,52 +3654,7 @@ async function migrarDatos() {
 // ============================================================
 // USUARIOS Y PERFILES
 // ============================================================
-var USUARIOS = [
-  {nombre:"C. ABIMAEL GUILLEN VARELA"                               , area:"SOPORTE TECNICO"                   , perfil:"SOLICITANTE"           , pin:"1001"},
-  {nombre:"CP. ALICIA HUERVO DIAZ"                                  , area:"TESORERIA"                         , perfil:"AUTORIZADOR"           , pin:"2010"},
-  {nombre:"C. ALSHARAMI HERNANDEZ LOPEZ"                            , area:"COMUNICACION SOCIAL"               , perfil:"SOLICITANTE"           , pin:"1002"},
-  {nombre:"LIC. AMALIA ROMERO AGUILERA"                             , area:"SECRETARIA"                        , perfil:"AUTORIZADOR"           , pin:"2020"},
-  {nombre:"LAE. ANDREA GUADALUPE ORTEGA PEREZ"                      , area:"INSTITUTO DE LA MUJER"             , perfil:"SOLICITANTE"           , pin:"1003"},
-  {nombre:"CP. ARTURO VAZQUEZ VAZQUEZ"                              , area:"CASA DE CULTURA"                   , perfil:"SOLICITANTE"           , pin:"1004"},
-  {nombre:"C. CARLOS REYES GARCIA"                                  , area:"REGIDURIA II"                      , perfil:"SOLICITANTE"           , pin:"1005"},
-  {nombre:"ING. CHRISTIAN ROMERO PEREZ"                             , area:"PRESIDENCIA"                       , perfil:"AUTORIZADOR"           , pin:"2030"},
-  {nombre:"C. DEMYS LISANDRO CAMARILLO MARTINEZ"                    , area:"TURISMO"                           , perfil:"SOLICITANTE"           , pin:"1006"},
-  {nombre:"LIC. EDUARDO RICARDO GARCIA REYES"                       , area:"TRANSPARENCIA"                     , perfil:"SOLICITANTE"           , pin:"1007"},
-  {nombre:"LIC. ERENDIRA SALGADO CARRION"                           , area:"ORGANO INTERNO DE CONTROL"         , perfil:"ADMINISTRADOR"         , pin:"2683"},
-  {nombre:"C. ERICK YAMIR ROMAN HERNANDEZ"                          , area:"SEGURIDAD PUBLICA"                 , perfil:"SOLICITANTE"           , pin:"1008"},
-  {nombre:"ING. EVELIA ROMERO VERGARA"                              , area:"DIF"                               , perfil:"SOLICITANTE"           , pin:"1009"},
-  {nombre:"LIC. EZEQUIEL CORRO SANTOS"                              , area:"PROTECCION CIVIL"                  , perfil:"SOLICITANTE"           , pin:"1010"},
-  {nombre:"C. FRANCISCO CRUZ CANO"                                  , area:"AYUDANTIA"                         , perfil:"SOLICITANTE"           , pin:"1011"},
-  {nombre:"C. GENARO ROBERTO ALVARADO GUZMAN"                       , area:"TERRITORIAL"                       , perfil:"SOLICITANTE"           , pin:"1012"},
-  {nombre:"ING. GERARDO NARANJO VILLALOBOS"                         , area:"RECURSOS HUMANOS"                  , perfil:"ADMINISTRADOR"         , pin:"2629"},
-  {nombre:"C. GLORIA CLARA ANDRADE"                                 , area:"PARQUES Y JARDINES"                , perfil:"SOLICITANTE"           , pin:"1013"},
-  {nombre:"C. GRISOL DEL CARMEN SANTOS MONTALVO"                    , area:"DESARROLLO SOCIAL"                 , perfil:"SOLICITANTE"           , pin:"1014"},
-  {nombre:"LIC. HECTOR MANUEL DELGADO ROJAS"                        , area:"JURIDICO"                          , perfil:"SOLICITANTE"           , pin:"1015"},
-  {nombre:"LIC. ILSE DE LA ANGELES HERNANDEZ JIMENEZ"               , area:"REGISTRO CIVIL"                    , perfil:"SOLICITANTE"           , pin:"1016"},
-  {nombre:"LIC. ISABEL CRISTINA AGUILAR MUNOZ"                      , area:"ARCHIVO HISTORICO"                 , perfil:"SOLICITANTE"           , pin:"1017"},
-  {nombre:"LIC. IZAMAR PEREZ JUAREZ"                                , area:"AUXILIAR DE PRESIDENCIA"           , perfil:"AUTORIZADOR"           , pin:"2040"},
-  {nombre:"LIC. JORGE GABRIEL NARANJO MARTINEZ"                     , area:"TESORERIA"                         , perfil:"AUXILIAR ADMINISTRATIVO", pin:"3010"},
-  {nombre:"C.P. JOSE ALFREDO OSORIO LOPEZ"                          , area:"TESORERIA"                         , perfil:"AUXILIAR ADMINISTRATIVO", pin:"3020"},
-  {nombre:"C. JOSE LUIS CHAGA AGUILERA"                             , area:"DEPORTE"                           , perfil:"SOLICITANTE"           , pin:"1018"},
-  {nombre:"LIC. JUAN ANTONIO NARANJO FERNANDEZ"                     , area:"ALUMBRADO"                         , perfil:"SOLICITANTE"           , pin:"1019"},
-  {nombre:"ING. JULIAN DE LA CRUZ RUPERTO"                          , area:"OBRAS PUBLICAS"                    , perfil:"SOLICITANTE"           , pin:"1020"},
-  {nombre:"LIC. KARLA GABRIELA DEL CARMEN MANZANERO MARQUEZ"        , area:"REGIDURIA IV"                      , perfil:"SOLICITANTE"           , pin:"1021"},
-  {nombre:"LEP. LOURDES MEDINA GAMBOA"                              , area:"SINDICATURA"                       , perfil:"SOLICITANTE"           , pin:"1022"},
-  {nombre:"LIC. LUIS ADRIAN DOMINGUEZ LOPEZ"                        , area:"REGIDURIA V"                       , perfil:"SOLICITANTE"           , pin:"1023"},
-  {nombre:"LIC. LUIS PALACIOS ROMERO"                               , area:"DESARROLLO RURAL"                  , perfil:"SOLICITANTE"           , pin:"1024"},
-  {nombre:"LIC. MARIAN YARED PEREZ ALCANTARA"                       , area:"REGIDURIA III"                     , perfil:"SOLICITANTE"           , pin:"1025"},
-  {nombre:"LIC. MARIO ALBERTO DELGADO ROJAS"                        , area:"FOMENTO AGROPECUARIO"              , perfil:"SOLICITANTE"           , pin:"1026"},
-  {nombre:"C. MELANIE AYLIN ORTIZ CARVAJAL"                         , area:"PARQUE VEHICULAR"                  , perfil:"PARQUE VEHICULAR"      , pin:"4010"},
-  {nombre:"LIC. MIGUEL ANGEL VILLEGAS RIVERA"                       , area:"SALUD"                             , perfil:"SOLICITANTE"           , pin:"1027"},
-  {nombre:"LIC. MIGUEL MONTALVO MARTINEZ"                           , area:"EDUCACION"                         , perfil:"SOLICITANTE"           , pin:"1028"},
-  {nombre:"C. NORMA JAQUELIN REYES SILVA"                           , area:"COMERCIO"                          , perfil:"SOLICITANTE"           , pin:"1029"},
-  {nombre:"C. OFELIA SANTOS RODRIGUEZ"                              , area:"MERCADO"                           , perfil:"SOLICITANTE"           , pin:"1030"},
-  {nombre:"C. ROSA ISELA SANTOS BALDERAS"                           , area:"BIBLIOTECA"                        , perfil:"SOLICITANTE"           , pin:"1031"},
-  {nombre:"C. VICTOR MANUEL MENDOZA REYES"                          , area:"CATASTRO"                          , perfil:"SOLICITANTE"           , pin:"1032"},
-  {nombre:"LIC. YANIRA GUADALUPE MENDOZA CRUZ"                      , area:"TESORERIA"                         , perfil:"AUXILIAR ADMINISTRATIVO", pin:"3030"},
-  {nombre:"LIC. YAMILETH DEL CARMEN MARQUEZ VERGARA"                , area:"REGIDURIA I"                       , perfil:"AUTORIZADOR"           , pin:"2050"},
-  {nombre:"C.P. YULIET DEL ROSARIO PEREZ SANDOVAL"                  , area:"TESORERIA"                         , perfil:"AUXILIAR ADMINISTRATIVO", pin:"3040"},
-];
+var USUARIOS = [];  // V300: los usuarios ahora viven en Supabase (tabla usuarios_sistema) + cache local
 
 // Permisos: sol=solicitar, apr=aprobar, hist=ver historial, cfg=admin
 var PM = {
@@ -4939,6 +4990,8 @@ function entrar(){
   uBadges();
   // Sincronizar datos desde Supabase al iniciar sesión (solo si hay datos en Supabase)
   pullFromSupabase().then(function(n){
+    // V302: los catálogos ya se repintaron dentro de pullCatalogos().
+    // Este bloque solo atiende los registros transaccionales.
     if(n>0){
       uBadges();
       // V214: refrescar la pantalla activa para que lo descargado se vea de inmediato
@@ -6325,23 +6378,53 @@ function marcarCerrado(){
 // ============================================================
 // STORAGE REQUISICIONES Y CATÁLOGOS
 // ============================================================
-var FONDOS_DEF=[{nombre:"PARTICIPACIONES",activo:true},{nombre:"FISCALES",activo:true},{nombre:"FORTAMUN",activo:true}];
-var PROGS_DEF=[
-  {clave:"2000",desc:"MATERIALES Y SUMINISTROS",activo:true},
-  {clave:"3000",desc:"SERVICIOS GENERALES",activo:true},
-  {clave:"4000",desc:"TRANSFERENCIAS, ASIGNACIONES, SUBSIDIOS Y OTRAS AYUDAS",activo:true},
-  {clave:"5000",desc:"BIENES MUEBLES E INMUEBLES",activo:true},
-  {clave:"2026 30 178 0105",desc:"REHABILITACION Y MTTO. MAYOR DE VEH. PROPIEDAD DEL H. AYUNTAMIENTO",activo:true},
-  {clave:"2026 30 178 0106",desc:"REPARACION Y MTTO. DE LOS VEH. DE SEGURIDAD PUBLICA",activo:true},
-  {clave:"2026 30 178 0115",desc:"ADQUISICION DE LUMINARIAS",activo:true}
-];
+// V301: vaciada a propósito. Los fondos se descargan de Supabase.
+// Mientras tuviera datos, un municipio nuevo veía los de Tlacotalpan.
+var FONDOS_DEF=[];
+// V301: vaciada a propósito. Los capítulos COG y las acciones
+// FORTAMUN se descargan de Supabase (cog_capitulos y programas).
+// Antes esta lista llevaba las acciones de Tlacotalpan dentro del
+// archivo, y cualquier municipio que abriera Catálogos las veía.
+var PROGS_DEF=[];
 var UM_OPTS=["PZA","KG","LT","MTS","CAJA","ROLLO","JUEGO","SERVICIO","HORA","DIA","GLOBAL","OTRO"];
 function getReqs(){return lsGet("egresos_reqs",[]);}
 function setReqs(d){if(!lsSet("egresos_reqs",d)){toast("⚠️ Sin espacio de almacenamiento — no se guardó. Los archivos grandes (fotos/PDF) requieren migrar a Supabase Storage.","err");return false;}syncToSupabase("requisiciones","egresos_reqs");return true;}
 function getFondos(){return lsGet("egresos_fondos",FONDOS_DEF);}
 function setFondos(d){if(!lsSet("egresos_fondos",d)){toast("⚠️ Sin espacio de almacenamiento — no se guardó. Los archivos grandes (fotos/PDF) requieren migrar a Supabase Storage.","err");return false;}syncToSupabase("fondos","egresos_fondos");return true;}
-function getProgs(){return lsGet("egresos_progs",PROGS_DEF);}
-function setProgs(d){if(!lsSet("egresos_progs",d)){toast("⚠️ Sin espacio de almacenamiento — no se guardó. Los archivos grandes (fotos/PDF) requieren migrar a Supabase Storage.","err");return false;}syncToSupabase("programas","egresos_progs");return true;}
+// ═══ V301: los programas ya no viven en este archivo ════════════
+// getCog()      → capítulos del Clasificador (norma federal, no se tocan)
+// getProgsMun() → acciones del propio municipio (las edita el Ayuntamiento)
+// getProgs()    → la unión de ambos, que es lo que ven las pantallas
+function getCog(){return lsGet("egresos_cog",[]);}
+function getProgsMun(){return lsGet("egresos_progs",[]);}
+function getProgs(){return getCog().concat(getProgsMun());}
+
+// Guarda SOLO las acciones municipales. Sube la lista completa —antes
+// mandaba únicamente datos[0], por eso nunca se respaldó ninguna— con
+// el nombre de columna que usa la tabla (`descripcion`, no `desc`) y
+// sin `id`, que Postgres asigna solo.
+function setProgs(d){
+  if(!lsSet("egresos_progs",d)){
+    toast("⚠️ Sin espacio de almacenamiento — no se guardó.","err");
+    return false;
+  }
+  subirProgramas(d);
+  return true;
+}
+async function subirProgramas(lista){
+  try{
+    initSupa();
+    if(!supa || !lista || !lista.length) return;
+    var filas=lista.map(function(p){
+      return {clave:p.clave, descripcion:p.desc, activo:p.activo!==false};
+    });
+    // onConflict usa el índice programas_municipio_clave: si la clave ya
+    // existe en este municipio se actualiza, si no se inserta.
+    // El municipio_id lo pone el DEFAULT mi_municipio_id().
+    var res=await supa.from('programas').upsert(filas,{onConflict:'municipio_id,clave'});
+    if(res.error) avisoSupabase('guardar programas', res.error.message);
+  }catch(e){ avisoSupabase('guardar programas', e.message); }
+}
 
 // ============================================================
 // M3: REQUISICIONES
@@ -11889,19 +11972,49 @@ function rCatalogos(){
   var fondos=getFondos();
   document.getElementById("cat-fondos").innerHTML=fondos.map(function(f,i){
     return"<tr><td>"+f.nombre+"</td><td style='text-align:center;'><span class='sb "+(f.activo?"sa":"sz")+"'>"+(f.activo?"Activo":"Inactivo")+"</span></td>"
-      +"<td><button class='btn bo btm' onclick='catTogFondo("+i+")'>"+(f.activo?"Desactivar":"Activar")+"</button></td></tr>";
+      +"<td><button class='btn bo btm' onclick='fondosSoloLectura()' title='Catálogo administrado por el proveedor del sistema'>"+(f.activo?"Desactivar":"Activar")+"</button></td></tr>";
   }).join("")||"<tr><td colspan='3' style='text-align:center;color:var(--text3);padding:16px;'>Sin fondos</td></tr>";
+  // V301: los capítulos COG se marcan y su botón queda bloqueado —
+  // son norma federal. Las acciones municipales sí se pueden activar
+  // y desactivar, y se identifican por clave, no por posición en la
+  // lista (el índice cambiaba al mezclar las dos fuentes).
   var progs=getProgs();
-  document.getElementById("cat-progs").innerHTML=progs.map(function(p,i){
+  document.getElementById("cat-progs").innerHTML=progs.map(function(p){
+    var boton = p.cog
+      ? "<button class='btn bo btm' onclick='cogSoloLectura()' title='Clasificador CONAC — norma federal'>🔒 Federal</button>"
+      : "<button class='btn bo btm' onclick=\"catTogProg('"+p.clave+"')\">"+(p.activo?"Desactivar":"Activar")+"</button>";
     return"<tr><td style='font-size:11px;font-weight:700;'>"+p.clave+"</td><td style='font-size:11px;'>"+p.desc+"</td>"
       +"<td style='text-align:center;'><span class='sb "+(p.activo?"sa":"sz")+"'>"+(p.activo?"Activo":"Inactivo")+"</span></td>"
-      +"<td><button class='btn bo btm' onclick='catTogProg("+i+")'>"+(p.activo?"Desactivar":"Activar")+"</button></td></tr>";
-  }).join("")||"<tr><td colspan='4' style='text-align:center;color:var(--text3);padding:16px;'>Sin programas</td></tr>";
+      +"<td>"+boton+"</td></tr>";
+  }).join("")||"<tr><td colspan='4' style='text-align:center;color:var(--text3);padding:16px;'>Sin programas — revisa la conexión y presiona ⬇️ Sync</td></tr>";
   rCatEntregables(); // V200
   rCatRetenciones(); // V207
 }
 function catTogFondo(i){var f=getFondos();f[i].activo=!f[i].activo;setFondos(f);rCatalogos();toast("Fondo actualizado","ok");}
-function catTogProg(i){var p=getProgs();p[i].activo=!p[i].activo;setProgs(p);rCatalogos();toast("Programa actualizado","ok");}
+function cogSoloLectura(){
+  toast("Los capítulos del Clasificador por Objeto del Gasto los emite el CONAC y son obligatorios a nivel nacional. No se pueden desactivar desde aquí.","err");
+}
+function catTogProg(clave){
+  var lista=getProgsMun();
+  for(var i=0;i<lista.length;i++){
+    if(lista[i].clave===clave){
+      lista[i].activo=!lista[i].activo;
+      setProgs(lista);
+      rCatalogos();
+      toast("Programa actualizado","ok");
+      return;
+    }
+  }
+  toast("No se encontró el programa "+clave,"err");
+}
+// V301: los fondos (PARTICIPACIONES, FISCALES, FORTAMUN…) son fuentes
+// federales iguales para todos los municipios, así que el catálogo se
+// administra de forma central y no desde cada Ayuntamiento.
+// Antes el botón abría un formulario que guardaba en local y fallaba en
+// silencio al subir. Ahora explica a dónde acudir.
+function fondosSoloLectura(){
+  toast("Los fondos son un catálogo federal compartido y se administran de forma central. Si necesitas dar de alta un fondo nuevo, solicítalo al administrador del sistema.","err");
+}
 function catGuardarFondo(){
   var n=document.getElementById("nf-n").value.trim().toUpperCase();
   if(!n){toast("Escribe el nombre del fondo","err");return;}
@@ -11914,7 +12027,10 @@ function catGuardarProg(){
   var c=document.getElementById("np-c").value.trim().toUpperCase();
   var d=document.getElementById("np-d").value.trim().toUpperCase();
   if(!c||!d){toast("Completa clave y descripción","err");return;}
-  var p=getProgs();p.push({clave:c,desc:d,activo:true});setProgs(p);
+  // V301: solo se agregan acciones municipales, nunca capítulos COG
+  var p=getProgsMun();
+  if(getProgs().some(function(x){return x.clave===c;})){toast("Esa clave ya existe","err");return;}
+  p.push({clave:c,desc:d,activo:true});setProgs(p);
   document.getElementById("np-c").value="";document.getElementById("np-d").value="";
   cm("m-prog");rCatalogos();toast("Programa agregado","ok");
 }
